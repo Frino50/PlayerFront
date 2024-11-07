@@ -5,4 +5,8 @@ import {nodePolyfills} from 'vite-plugin-node-polyfills';
 // https://vite.dev/config/
 export default defineConfig({
     plugins: [vue(), nodePolyfills()],
+    server: {
+        port: 8081,
+        host: true,
+    }
 });
