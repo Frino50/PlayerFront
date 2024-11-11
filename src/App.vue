@@ -1,14 +1,18 @@
 <template>
   <div>
     <div v-if="!playerId">
-      <FloatLabelInput v-model="pseudo" label="pseudo"/>
+      <FloatLabelInput v-model="pseudo" label="Pseudo"/>
       <button class="button-start" @click="startGame">Start</button>
+      <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
     </div>
 
     <div v-else>
-      <div v-for="(player, id) in players" :key="id"
-           :style="{ top: `${player.position.y}px`, left: `${player.position.x}px` }"
-           class="player">
+      <div
+          v-for="(player, id) in players"
+          :key="id"
+          :style="{ top: `${player.position.y}px`, left: `${player.position.x}px` }"
+          class="player"
+      >
         <div class="player-name">
           {{ player.pseudo }}
         </div>
@@ -17,7 +21,6 @@
   </div>
 </template>
 
-
 <script lang="ts" setup>
 import SockJS from 'sockjs-client';
 import Stomp from 'stompjs';
@@ -25,142 +28,115 @@ import {onBeforeUnmount, onMounted, ref} from 'vue';
 import FloatLabelInput from "./components/FloatLabelInput.vue";
 import Position from "./models/position.ts";
 import Player from "./models/Player.ts";
+import playerService from "./services/playerService.ts";
 
-const pseudo = ref();
+const pseudo = ref<string>('');
 const playerId = ref<string>('');
-const players = ref<{ [key: string]: Player }>({});
-let socket: any;
-let stompClient: any;
-const movementSpeed = 5;
-let isMoving = false;
-let movementDirection: Position = {x: 0, y: 0};
-let keysPressed: Set<string> = new Set();
+const players = ref<Record<string, Player>>({});
+const movementDirection = ref<Position>({x: 0, y: 0});
+const keysPressed = ref<Set<string>>(new Set());
+const isMoving = ref(false);
+const errorMessage = ref<string | null>(null);
+const movementSpeed = 3;
 
-function startGame() {
-  console.log(pseudoNotUse())
-  if (pseudo.value.trim() && pseudoNotUse()) {
-    playerId.value = pseudo.value.trim();
+let socket: WebSocket | null = null;
+let stompClient: Stomp.Client | null = null;
 
-    socket = new SockJS("http://localhost:8082/ws");
-    stompClient = Stomp.over(socket);
-
-    stompClient.connect({}, () => {
-      stompClient.subscribe("/topic/connect", (message: any) => {
-        players.value = JSON.parse(message.body);
-      });
-
-      stompClient.subscribe("/topic/disconnect", (message: any) => {
-        const disconnectedPlayerId = message.body;
-        delete players.value[disconnectedPlayerId];
-      });
-
-      stompClient.subscribe("/topic/movements", (message: any) => {
-        players.value = JSON.parse(message.body);
-      });
-
-      stompClient.send("/app/connect", {}, JSON.stringify({ pseudo: playerId.value }));
-
-      window.addEventListener('keydown', movePlayer);
-      window.addEventListener('keyup', stopMovement);
-    });
+async function startGame() {
+  if (pseudo.value && await pseudoNotInUse()) {
+    playerId.value = pseudo.value;
+    connectToWebSocket();
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
   } else {
-    alert('Pseudo déjà utilisé');
+    showErrorMessage('Pseudo déjà utilisé');
   }
 }
 
-function pseudoNotUse(): boolean {
-  return !players.value[pseudo.value.trim()];
+async function pseudoNotInUse() {
+  const response = await playerService.getAll();
+  return response.data ? !response.data.includes(pseudo.value) : false;
 }
 
-function movePlayer(event: KeyboardEvent) {
+function showErrorMessage(message: string) {
+  errorMessage.value = message;
+  setTimeout(() => {
+    errorMessage.value = null;
+  }, 3000);
+}
+
+function connectToWebSocket() {
+  socket = new SockJS("ws");
+  stompClient = Stomp.over(socket);
+
+  stompClient.connect({}, () => {
+    initializePlayerSubscriptions();
+    stompClient!.send("/app/connect", {}, JSON.stringify({pseudo: playerId.value}));
+  });
+}
+
+function initializePlayerSubscriptions() {
+  stompClient!.subscribe("/topic/connect", (message) => {
+    players.value = JSON.parse(message.body);
+  });
+  stompClient!.subscribe("/topic/disconnect", (message) => {
+    const disconnectedPlayerId = message.body;
+    delete players.value[disconnectedPlayerId];
+  });
+  stompClient!.subscribe("/topic/movements", (message) => {
+    players.value = JSON.parse(message.body);
+  });
+}
+
+function updatePlayerPosition(player: Player) {
+  if (!isMoving.value) return;
+
+  player.position.x += movementDirection.value.x;
+  player.position.y += movementDirection.value.y;
+  stompClient!.send("/app/move", {}, JSON.stringify(player));
+
+  requestAnimationFrame(() => updatePlayerPosition(player));
+}
+
+function handleKeyDown(event: KeyboardEvent) {
   const player = players.value[playerId.value];
-  if (!player || keysPressed.has(event.key)) return;
-  keysPressed.add(event.key);
+  if (!player || keysPressed.value.has(event.key)) return;
 
-  let translateX = 0;
-  let translateY = 0;
+  keysPressed.value.add(event.key);
+  updateDirection(event.key, movementSpeed);
 
-  if (event.key === 'ArrowUp') {
-    translateY = -movementSpeed;
-  }
-  if (event.key === 'ArrowDown') {
-    translateY = movementSpeed;
-  }
-  if (event.key === 'ArrowLeft') {
-    translateX = -movementSpeed;
-  }
-  if (event.key === 'ArrowRight') {
-    translateX = movementSpeed;
-  }
-
-  movementDirection.x += translateX;
-  movementDirection.y += translateY;
-
-  if (!isMoving) {
-    isMoving = true;
-    movePlayerContinuously(player);
+  if (!isMoving.value) {
+    isMoving.value = true;
+    updatePlayerPosition(player);
   }
 }
 
-function stopMovement(event: KeyboardEvent) {
+function handleKeyUp(event: KeyboardEvent) {
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
-    keysPressed.delete(event.key);
+    keysPressed.value.delete(event.key);
+    updateDirection(event.key, 0);
 
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-      movementDirection.y = 0;
-    }
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      movementDirection.x = 0;
-    }
-
-    if (movementDirection.x === 0 && movementDirection.y === 0) {
-      isMoving = false;
+    if (movementDirection.value.x === 0 && movementDirection.value.y === 0) {
+      isMoving.value = false;
     }
   }
 }
 
-function movePlayerContinuously(player: Player) {
-  function updatePosition() {
-    if (!isMoving) return;
-
-    player.position.x += movementDirection.x;
-    player.position.y += movementDirection.y;
-
-    stompClient.send("/app/move", {}, JSON.stringify(player));
-
-    requestAnimationFrame(updatePosition);
-  }
-
-  updatePosition();
+function updateDirection(key: string, speed: number) {
+  if (key === 'ArrowUp') movementDirection.value.y = -speed;
+  if (key === 'ArrowDown') movementDirection.value.y = speed;
+  if (key === 'ArrowLeft') movementDirection.value.x = -speed;
+  if (key === 'ArrowRight') movementDirection.value.x = speed;
 }
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', movePlayer);
-  window.removeEventListener('keyup', stopMovement);
+  window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('keyup', handleKeyUp);
 });
 
 onMounted(() => {
-  getAllPlayers()
   window.addEventListener('keydown', handleEnterPress);
 });
-
-function getAllPlayers() {
-  // Connexion au WebSocket
-  socket = new SockJS("http://localhost:8082/ws");
-  stompClient = Stomp.over(socket);
-
-  // Connexion et abonnement au canal /topic/getAll
-  stompClient.connect({}, () => {
-    // S'abonner à /topic/getAll pour recevoir les joueurs
-    stompClient.subscribe("/topic/getAll", (message: any) => {
-      players.value = JSON.parse(message.body);
-      console.log(players.value); // Affiche les joueurs reçus
-    });
-
-    // Envoyer un message pour demander la liste des joueurs
-    stompClient.send("/app/getAll", {}, JSON.stringify({}));
-  });
-}
 
 function handleEnterPress(event: KeyboardEvent) {
   if (event.key === 'Enter' && !playerId.value) {
@@ -195,5 +171,11 @@ function handleEnterPress(event: KeyboardEvent) {
   font-size: 14px;
   color: black;
   font-weight: bold;
+}
+
+.error-message {
+  color: red;
+  font-size: 0.9rem;
+  margin-top: 1rem;
 }
 </style>
